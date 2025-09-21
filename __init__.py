@@ -1,33 +1,104 @@
-# This is a stub package designed to roughly emulate the _yaml
-# extension module, which previously existed as a standalone module
-# and has been moved into the `yaml` package namespace.
-# It does not perfectly mimic its old counterpart, but should get
-# close enough for anyone who's relying on it even when they shouldn't.
-import yaml
+# SPDX-License-Identifier: MIT
 
-# in some circumstances, the yaml module we imoprted may be from a different version, so we need
-# to tread carefully when poking at it here (it may not have the attributes we expect)
-if not getattr(yaml, '__with_libyaml__', False):
-    from sys import version_info
+"""
+Classes Without Boilerplate
+"""
 
-    exc = ModuleNotFoundError if version_info >= (3, 6) else ImportError
-    raise exc("No module named '_yaml'")
-else:
-    from yaml._yaml import *
-    import warnings
-    warnings.warn(
-        'The _yaml extension module is now located at yaml._yaml'
-        ' and its location is subject to change.  To use the'
-        ' LibYAML-based parser and emitter, import from `yaml`:'
-        ' `from yaml import CLoader as Loader, CDumper as Dumper`.',
-        DeprecationWarning
-    )
-    del warnings
-    # Don't `del yaml` here because yaml is actually an existing
-    # namespace member of _yaml.
+from functools import partial
+from typing import Callable, Literal, Protocol
 
-__name__ = '_yaml'
-# If the module is top-level (i.e. not a part of any specific package)
-# then the attribute should be set to ''.
-# https://docs.python.org/3.8/library/types.html
-__package__ = ''
+from . import converters, exceptions, filters, setters, validators
+from ._cmp import cmp_using
+from ._config import get_run_validators, set_run_validators
+from ._funcs import asdict, assoc, astuple, has, resolve_types
+from ._make import (
+    NOTHING,
+    Attribute,
+    Converter,
+    Factory,
+    _Nothing,
+    attrib,
+    attrs,
+    evolve,
+    fields,
+    fields_dict,
+    make_class,
+    validate,
+)
+from ._next_gen import define, field, frozen, mutable
+from ._version_info import VersionInfo
+
+
+s = attributes = attrs
+ib = attr = attrib
+dataclass = partial(attrs, auto_attribs=True)  # happy Easter ;)
+
+
+class AttrsInstance(Protocol):
+    pass
+
+
+NothingType = Literal[_Nothing.NOTHING]
+
+__all__ = [
+    "NOTHING",
+    "Attribute",
+    "AttrsInstance",
+    "Converter",
+    "Factory",
+    "NothingType",
+    "asdict",
+    "assoc",
+    "astuple",
+    "attr",
+    "attrib",
+    "attributes",
+    "attrs",
+    "cmp_using",
+    "converters",
+    "define",
+    "evolve",
+    "exceptions",
+    "field",
+    "fields",
+    "fields_dict",
+    "filters",
+    "frozen",
+    "get_run_validators",
+    "has",
+    "ib",
+    "make_class",
+    "mutable",
+    "resolve_types",
+    "s",
+    "set_run_validators",
+    "setters",
+    "validate",
+    "validators",
+]
+
+
+def _make_getattr(mod_name: str) -> Callable:
+    """
+    Create a metadata proxy for packaging information that uses *mod_name* in
+    its warnings and errors.
+    """
+
+    def __getattr__(name: str) -> str:
+        if name not in ("__version__", "__version_info__"):
+            msg = f"module {mod_name} has no attribute {name}"
+            raise AttributeError(msg)
+
+        from importlib.metadata import metadata
+
+        meta = metadata("attrs")
+
+        if name == "__version_info__":
+            return VersionInfo._from_version_string(meta["version"])
+
+        return meta["version"]
+
+    return __getattr__
+
+
+__getattr__ = _make_getattr(__name__)
