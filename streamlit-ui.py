@@ -1,123 +1,92 @@
 import streamlit as st
-from io import BytesIO
-import sys
-from typing import List
+import os
+import fitz  # PyMuPDF
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForTokenClassification
+import warnings
+from sklearn.exceptions import ConvergenceWarning
 
-st.set_page_config(page_title="Legal Document Analysis", layout="wide")
+# Suppress warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-# Try to import PyPDF2 at the top
-try:
-    import PyPDF2
-except ImportError:
-    PyPDF2 = None
+# Summarization pipeline setup
+model_name = "shresthasingh/my_awesome_billsum_model"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
 
-def extract_text_from_pdf_bytes(pdf_bytes: bytes, use_ocr: bool = False) -> str:
-    if not PyPDF2:
-        return "PyPDF2 not installed. Install with: pip install PyPDF2"
+# NER pipeline setup
+ner_tokenizer = AutoTokenizer.from_pretrained("dslim/bert-base-NER")
+ner_model = AutoModelForTokenClassification.from_pretrained("dslim/bert-base-NER")
+ner_pipeline = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer)
 
-    text_pages: List[str] = []
-    try:
-        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
-        for page in reader.pages:
-            txt = page.extract_text() or ""
-            text_pages.append(txt)
-    except Exception as e:
-        return f"PDF extraction error: {e}"
+def extract_text_from_pdf(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        page_text = page.get_text()
+        text += page_text
+    return text
 
-    text = "\n".join(text_pages).strip()
-    if text:
-        return text
+def summarize_text(text, min_length=30):
+    return summarizer(text, min_length=min_length, do_sample=False)[0]['summary_text']
 
-    if use_ocr:
-        try:
-            from pdf2image import convert_from_bytes
-            import pytesseract
-        except Exception:
-            return "OCR dependencies missing. Install pdf2image and pytesseract to enable OCR."
+def chunk_text(text, chunk_size=512):
+    words = text.split()
+    chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    return chunks
 
-        try:
-            images = convert_from_bytes(pdf_bytes)
-            ocr_text = [pytesseract.image_to_string(img) for img in images]
-            return "\n".join(ocr_text)
-        except Exception as e:
-            return f"OCR extraction failed: {e}"
-    return "No extractable text found. Try enabling OCR."
+def recursive_summarize(text, chunk_size=300, min_length=30):
+    if len(text.split()) <= chunk_size:
+        return summarize_text(text, min_length)
 
-# Attempt to reuse repo analysis functions if present
-summarize_fn = None
-ner_fn = None
-try:
-    import importlib.util, pathlib
-    repo_root = pathlib.Path(__file__).resolve().parent
-    candidate = repo_root / "code" / "analysis.py"
-    if candidate.exists():
-        spec = importlib.util.spec_from_file_location("repo_analysis", str(candidate))
-        repo_analysis = importlib.util.module_from_spec(spec)
-        sys.modules["repo_analysis"] = repo_analysis
-        spec.loader.exec_module(repo_analysis)
-        summarize_fn = getattr(repo_analysis, "summarize_text", None)
-        ner_fn = getattr(repo_analysis, "extract_entities", None)
-except Exception as e:
-    st.warning(f"Could not import analysis functions: {e}")
+    chunks = chunk_text(text, chunk_size)
+    summaries = [summarize_text(chunk, min_length) for chunk in chunks]
+    combined_summary = ' '.join(summaries)
+    return recursive_summarize(combined_summary, chunk_size, min_length)
 
-# Fallback to Hugging Face pipelines if repo functions not present
-hf_summarizer = None
-hf_ner = None
-if not summarize_fn or not ner_fn:
-    try:
-        from transformers import pipeline
-        if not summarize_fn:
-            hf_summarizer = pipeline("summarization", model="google/flan-t5-small")
-        if not ner_fn:
-            hf_ner = pipeline("ner", grouped_entities=True)
-    except Exception as e:
-        st.warning(f"Could not load Hugging Face pipelines: {e}")
+def extract_named_entities(text, chunk_size=256):
+    chunks = chunk_text(text, chunk_size)
+    entities = {'PER': set(), 'ORG': set(), 'LOC': set()}
+    
+    for chunk in chunks:
+        ner_results = ner_pipeline(chunk)
+        for result in ner_results:
+            entity_type = result['entity'].split('-')[-1]
+            if entity_type in entities:
+                entity_value = result['word'].replace('##', '')
+                entities[entity_type].add(entity_value)
+    
+    return entities
 
-st.title("Legal Document Analysis")
-uploaded = st.file_uploader("Upload PDF", type=["pdf"])
-use_ocr = st.checkbox("Use OCR (for scanned PDFs)", value=False)
-show_raw = st.checkbox("Show raw extracted text", value=False)
+def process_legal_document(pdf_file):
+    # Extract text from PDF
+    text = extract_text_from_pdf(pdf_file)
+    
+    # Generate summary
+    summary = recursive_summarize(text)
+    
+    # Extract named entities
+    entities = extract_named_entities(text)
+    
+    return summary, entities
 
-if uploaded:
-    bytes_data = uploaded.read()
-    with st.spinner("Extracting text..."):
-        extracted = extract_text_from_pdf_bytes(bytes_data, use_ocr=use_ocr)
+# Streamlit App
+st.title("Legal Document Summarizer")
+st.write("Upload PDF documents to generate summaries and extract named entities.")
 
-    if show_raw:
-        st.subheader("Extracted Text")
-        st.text_area("Raw text", extracted, height=300)
+uploaded_files = st.file_uploader("Choose PDF files", type="pdf", accept_multiple_files=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Summarize"):
-            if summarize_fn:
-                with st.spinner("Summarizing using repo function..."):
-                    summary = summarize_fn(extracted)
-            elif hf_summarizer:
-                with st.spinner("Summarizing with Hugging Face model..."):
-                    MAX_CHUNK = 1000
-                    chunks = [extracted[i:i+MAX_CHUNK] for i in range(0, len(extracted), MAX_CHUNK)]
-                    summaries = [hf_summarizer(c)[0]["summary_text"] for c in chunks]
-                    summary = "\n\n".join(summaries)
-            else:
-                summary = "No summarization backend available. Install transformers or add summarize_text in code/analysis.py"
-            st.subheader("Summary")
-            st.write(summary)
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        summary, entities = process_legal_document(uploaded_file)
+        
+        st.write(f"**File:** {uploaded_file.name}")
+        st.write(f"**Summary:** {summary}")
+        
+        st.write("**Named Entities:**")
+        st.write(f"**Persons:** {', '.join(entities['PER'])}")
+        st.write(f"**Organizations:** {', '.join(entities['ORG'])}")
+        st.write(f"**Locations:** {', '.join(entities['LOC'])}")
 
-    with col2:
-        if st.button("Extract Entities"):
-            if ner_fn:
-                with st.spinner("Extracting entities using repo function..."):
-                    entities = ner_fn(extracted)
-            elif hf_ner:
-                with st.spinner("Extracting entities with Hugging Face model..."):
-                    entities = hf_ner(extracted)
-            else:
-                entities = "No NER backend available. Install transformers or add extract_entities in code/analysis.py"
-            st.subheader("Named Entities")
-            st.write(entities)
-
-    st.markdown("---")
-    st.caption("Notes: For OCR enable 'Use OCR' and ensure pdf2image + pytesseract are installed and configured. To reuse your repo logic, implement summarize_text(text)->str and extract_entities(text)->Any in code/analysis.py.")
-else:
-    st.info("Upload a PDF to start analysis.")
+st.write("Note: The analysis results are displayed above.")
